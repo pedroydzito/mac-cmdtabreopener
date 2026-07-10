@@ -17,6 +17,11 @@
 #   happened), it will NOT auto-reopen — this only triggers on an actual
 #   app switch. That's intentional.
 #
+#   Also: quitting an app (Cmd+Q) does NOT trigger a reopen of whatever
+#   app macOS activates next (often Finder), even if that app has no
+#   window — that's the OS handing off focus automatically, not you
+#   choosing to switch to it.
+#
 # Uses only public, permission-free APIs (NSWorkspace, CGWindowList,
 # /usr/bin/open). No Accessibility or Automation permission required.
 
@@ -68,6 +73,15 @@ cat > "$SUPPORT/daemon.js" <<'DAEMONEOF'
 // app's window and Cmd+Tabbing right back to it without touching any
 // other app in between) — that requires guessing when an app is
 // "stuck", which is exactly what caused the incident above.
+//
+// Third safety/correctness net: when you Cmd+Q an app, macOS
+// automatically activates whatever app comes next (often Finder) —
+// that's not a deliberate Cmd+Tab switch, just the OS handing off
+// focus. We can't tell the two apart from the activation event alone,
+// so instead we suppress reopening for a couple seconds after any app
+// quits. Without this, quitting an app while Finder happened to be
+// minimized would make Finder pop open right after, which is
+// surprising and not something the user asked for.
 
 ObjC.import('AppKit')
 ObjC.import('CoreGraphics')
@@ -81,11 +95,13 @@ var BLACKLIST = [
 ]
 
 var MIN_SECONDS_BETWEEN_REOPENS = 1.0
+var SECONDS_TO_SUPPRESS_AFTER_QUIT = 2.0
 
 var ws = $.NSWorkspace.sharedWorkspace
 var nc = ws.notificationCenter
 var lastActivatedBid = ''
 var lastReopenAt = 0
+var lastQuitAt = 0
 
 function isBlacklisted(bid) {
   return BLACKLIST.indexOf(bid) !== -1
@@ -114,6 +130,13 @@ function reopen(bid) {
 }
 
 nc.addObserverForNameObjectQueueUsingBlock(
+  'NSWorkspaceDidTerminateApplicationNotification', $(), $.NSOperationQueue.mainQueue,
+  function (notif) {
+    lastQuitAt = $.NSDate.date.timeIntervalSince1970
+  }
+)
+
+nc.addObserverForNameObjectQueueUsingBlock(
   'NSWorkspaceDidActivateApplicationNotification', $(), $.NSOperationQueue.mainQueue,
   function (notif) {
     var app = notif.userInfo.objectForKey('NSWorkspaceApplicationKey')
@@ -126,6 +149,9 @@ nc.addObserverForNameObjectQueueUsingBlock(
     lastActivatedBid = bid
 
     if (isBlacklisted(bid)) return
+
+    var now = $.NSDate.date.timeIntervalSince1970
+    if (now - lastQuitAt < SECONDS_TO_SUPPRESS_AFTER_QUIT) return // likely an automatic OS handoff after quitting another app, not a deliberate switch
 
     var pid = app.processIdentifier
     if (normalWindowCount(pid) > 0) return // already has a window, nothing to do
