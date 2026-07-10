@@ -9,6 +9,13 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 launchctl unload "$PLIST" 2>/dev/null || true
 rm -f "$PLIST"
+
+# Belt-and-suspenders: the service runs with KeepAlive, so if `unload`
+# and a launchd respawn ever race, a copy of the daemon could survive
+# the unload above. Force-kill anything still running by process
+# pattern, so this always fully stops it in one click.
+pkill -f "CmdTabReopener/daemon.js" 2>/dev/null || true
+
 rm -rf "$SUPPORT"
 
 echo ""

@@ -38,21 +38,39 @@ cat > "$SUPPORT/daemon.js" <<'DAEMONEOF'
 #!/usr/bin/osascript -l JavaScript
 //
 // CmdTabReopener daemon
-// Event-driven (no polling): reacts instantly to
+// Event-driven (no polling): reacts to
 // NSWorkspaceDidActivateApplicationNotification (fired on every real app
-// switch — Cmd+Tab, Dock click, click on another app, etc.) and reopens/
-// restores the app's window via `open -b`, which also un-minimizes.
+// switch — Cmd+Tab, Dock click, click on another app, etc.) and, only if
+// the newly-activated app has ZERO on-screen windows (closed or
+// minimized), reopens/restores it via `open -b` — the same thing that
+// happens when you click its Dock icon.
+//
+// Two safety nets, both learned from real incidents:
+//
+// 1. Only acts when the target app actually has no window. Earlier
+//    versions called `open -b` on every single switch, even for apps
+//    that already had a window open. That's wasteful, and for apps
+//    whose "reopen" handler always creates a new window regardless of
+//    existing ones, it can spawn extra windows on ordinary switches.
+//
+// 2. A hard global cooldown: at most one `open -b` call per second,
+//    full stop, no matter how many activation events arrive. If
+//    anything (a system hiccup, another app, a notification storm)
+//    ever causes a rapid burst of app-activation events, this cooldown
+//    caps how much this daemon can possibly amplify it. A previous
+//    version's watchdog (now removed) caused a runaway focus-stealing
+//    loop that made the whole Mac briefly unusable; this cooldown makes
+//    that class of failure structurally impossible, regardless of root
+//    cause.
 //
 // Deliberately does NOT try to detect "app is still frontmost but lost
 // its last window without a real switch happening" (e.g. closing an
-// app's window and Cmd+Tabbing back to it right away without touching
-// any other app in between). An earlier version attempted to fix that
-// case by force-hiding the frontmost app once it looked "stuck", but
-// that logic produced a feedback loop (repeatedly hiding/refocusing)
-// that made the whole Mac unusable. Not worth the risk for a case that
-// barely comes up in practice.
+// app's window and Cmd+Tabbing right back to it without touching any
+// other app in between) — that requires guessing when an app is
+// "stuck", which is exactly what caused the incident above.
 
 ObjC.import('AppKit')
+ObjC.import('CoreGraphics')
 ObjC.import('Foundation')
 
 // Bundle IDs to exclude entirely (menu-bar-only utilities you don't want
@@ -62,15 +80,33 @@ var BLACKLIST = [
   // 'com.example.someMenuBarApp',
 ]
 
+var MIN_SECONDS_BETWEEN_REOPENS = 1.0
+
 var ws = $.NSWorkspace.sharedWorkspace
 var nc = ws.notificationCenter
 var lastActivatedBid = ''
+var lastReopenAt = 0
 
 function isBlacklisted(bid) {
   return BLACKLIST.indexOf(bid) !== -1
 }
 
+function normalWindowCount(pid) {
+  var info = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID)
+  var arr = ObjC.deepUnwrap(info)
+  var count = 0
+  for (var i = 0; i < arr.length; i++) {
+    var w = arr[i]
+    if (w.kCGWindowOwnerPID === pid && w.kCGWindowLayer === 0) count++
+  }
+  return count
+}
+
 function reopen(bid) {
+  var now = $.NSDate.date.timeIntervalSince1970
+  if (now - lastReopenAt < MIN_SECONDS_BETWEEN_REOPENS) return
+  lastReopenAt = now
+
   var t = $.NSTask.alloc.init
   t.launchPath = '/usr/bin/open'
   t.arguments = $(['-b', bid])
@@ -90,6 +126,10 @@ nc.addObserverForNameObjectQueueUsingBlock(
     lastActivatedBid = bid
 
     if (isBlacklisted(bid)) return
+
+    var pid = app.processIdentifier
+    if (normalWindowCount(pid) > 0) return // already has a window, nothing to do
+
     reopen(bid)
   }
 )
