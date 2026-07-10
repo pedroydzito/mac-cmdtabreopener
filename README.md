@@ -11,6 +11,15 @@ Download the latest [release](https://github.com/pedroydzito/mac-cmdtabreopener/
 unzip it, then double-click **`Activate.command`**. To remove it,
 double-click **`Deactivate.command`**.
 
+It only acts on apps you explicitly add to the `ALLOWLIST` array near
+the top of `Activate.command` (empty by default, so it does nothing
+until you add some). Some apps run background helpers that can briefly
+activate themselves with no window for reasons unrelated to you
+switching apps — reacting to every app on the system caused exactly
+that kind of false trigger, so this opts in per app instead. Find a
+bundle ID with `osascript -e 'id of app "App Name"'`, add it to the
+list, then re-run `Activate.command`.
+
 Note: it won't reopen an app if you close its last window and
 immediately `Cmd+Tab` right back to it without switching to any other
 app first — that's intentional. macOS still reports that app as
