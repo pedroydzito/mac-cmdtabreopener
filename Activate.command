@@ -78,10 +78,20 @@ cat > "$SUPPORT/daemon.js" <<'DAEMONEOF'
 // automatically activates whatever app comes next (often Finder) —
 // that's not a deliberate Cmd+Tab switch, just the OS handing off
 // focus. We can't tell the two apart from the activation event alone,
-// so instead we suppress reopening for a couple seconds after any app
-// quits. Without this, quitting an app while Finder happened to be
-// minimized would make Finder pop open right after, which is
-// surprising and not something the user asked for.
+// so we suppress reopening for a couple seconds after any app quits.
+// Without this, quitting an app while Finder happened to be minimized
+// would make Finder pop open right after, which is surprising and not
+// something the user asked for.
+//
+// Important ordering detail (measured directly, not assumed): the
+// "next app activated" notification fires BEFORE the "app terminated"
+// notification for the app you just quit — by only a few milliseconds,
+// but the wrong order all the same. Checking "did an app quit recently"
+// at the moment of activation is therefore always too early: the quit
+// hasn't been reported yet. To fix that, the actual reopen decision
+// runs on a short delay (REOPEN_CHECK_DELAY_SECONDS) after activation,
+// giving the (near-simultaneous) termination notification time to
+// arrive first if this was a quit-triggered handoff.
 
 ObjC.import('AppKit')
 ObjC.import('CoreGraphics')
@@ -96,6 +106,7 @@ var BLACKLIST = [
 
 var MIN_SECONDS_BETWEEN_REOPENS = 1.0
 var SECONDS_TO_SUPPRESS_AFTER_QUIT = 2.0
+var REOPEN_CHECK_DELAY_SECONDS = 0.35
 
 var ws = $.NSWorkspace.sharedWorkspace
 var nc = ws.notificationCenter
@@ -150,13 +161,18 @@ nc.addObserverForNameObjectQueueUsingBlock(
 
     if (isBlacklisted(bid)) return
 
-    var now = $.NSDate.date.timeIntervalSince1970
-    if (now - lastQuitAt < SECONDS_TO_SUPPRESS_AFTER_QUIT) return // likely an automatic OS handoff after quitting another app, not a deliberate switch
-
     var pid = app.processIdentifier
-    if (normalWindowCount(pid) > 0) return // already has a window, nothing to do
 
-    reopen(bid)
+    // Wait a beat before deciding: if this activation was actually
+    // caused by another app quitting, its termination notification
+    // will arrive within a few milliseconds — this delay gives it time
+    // to land before we check lastQuitAt.
+    $.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(REOPEN_CHECK_DELAY_SECONDS, false, function () {
+      var now = $.NSDate.date.timeIntervalSince1970
+      if (now - lastQuitAt < SECONDS_TO_SUPPRESS_AFTER_QUIT) return // was an automatic OS handoff after quitting another app, not a deliberate switch
+      if (normalWindowCount(pid) > 0) return // already has a window, nothing to do
+      reopen(bid)
+    })
   }
 )
 
