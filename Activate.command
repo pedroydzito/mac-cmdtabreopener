@@ -22,12 +22,12 @@
 #   window — that's the OS handing off focus automatically, not you
 #   choosing to switch to it.
 #
-#   Only acts on apps you explicitly list in ALLOWLIST below (empty by
-#   default — add bundle IDs for the apps you want this behavior for).
-#   Some apps run background helpers (login items, auto-updaters) that
-#   can briefly activate themselves with no window, which this daemon
-#   would otherwise try to "helpfully" reopen — better to opt in per
-#   app than to react to every app on the system.
+#   Acts on every app by default. Apps listed in BLACKLIST below are
+#   excluded — currently TickTick and its background helpers (login
+#   item + Sparkle auto-updater), which caused a focus-stealing loop by
+#   self-activating with no window for reasons unrelated to the user
+#   switching apps. Add more bundle IDs there if another app ever does
+#   the same thing.
 #
 # Uses only public, permission-free APIs (NSWorkspace, CGWindowList,
 # /usr/bin/open). No Accessibility or Automation permission required.
@@ -100,28 +100,27 @@ cat > "$SUPPORT/daemon.js" <<'DAEMONEOF'
 // giving the (near-simultaneous) termination notification time to
 // arrive first if this was a quit-triggered handoff.
 //
-// Fourth safety net, and the most important one: ALLOWLIST instead of
-// blacklist. This used to react to every app on the system by default.
-// Some apps (e.g. TickTick) run background helpers — login items,
-// Sparkle auto-updaters, etc — with their own bundle IDs that can
-// briefly self-activate with no window of their own, for reasons that
-// have nothing to do with the user switching apps. Reacting to that
-// caused a focus-stealing loop bouncing between that helper and
-// whatever else was running. There's no permission-free way to tell
-// "the user pressed Cmd+Tab" apart from "some app activated something
-// programmatically" — so instead of chasing every app's internal
-// quirks one at a time, this only ever acts on apps listed below.
+// Fourth safety net: BLACKLIST. Some apps (e.g. TickTick) run
+// background helpers — login items, Sparkle auto-updaters, etc — with
+// their own bundle IDs that can briefly self-activate with no window
+// of their own, for reasons that have nothing to do with the user
+// switching apps. Reacting to that caused a focus-stealing loop
+// bouncing between that helper and whatever else was running. There's
+// no permission-free way to tell "the user pressed Cmd+Tab" apart from
+// "some app activated something programmatically," so known offenders
+// are excluded by bundle ID instead.
 
 ObjC.import('AppKit')
 ObjC.import('CoreGraphics')
 ObjC.import('Foundation')
 
-// Only apps listed here get auto-reopened. Empty by default — add the
-// bundle IDs of the apps you actually want this for. Find an app's
-// bundle id with:
+// Apps listed here are excluded from auto-reopen entirely. Find an
+// app's bundle id with:
 //   osascript -e 'id of app "App Name"'
-var ALLOWLIST = [
-  // 'com.example.someApp',
+var BLACKLIST = [
+  'com.TickTick.task.mac',                    // TickTick
+  'com.TickTick.task.mac-LaunchAtLoginHelper', // TickTick's login-item helper
+  'org.sparkle-project.Sparkle.Updater',       // Sparkle auto-updater (used by TickTick and others)
 ]
 
 var MIN_SECONDS_BETWEEN_REOPENS = 1.0
@@ -134,8 +133,8 @@ var lastActivatedBid = ''
 var lastReopenAt = 0
 var lastQuitAt = 0
 
-function isAllowed(bid) {
-  return ALLOWLIST.indexOf(bid) !== -1
+function isBlacklisted(bid) {
+  return BLACKLIST.indexOf(bid) !== -1
 }
 
 function normalWindowCount(pid) {
@@ -179,7 +178,7 @@ nc.addObserverForNameObjectQueueUsingBlock(
     if (bid === lastActivatedBid) return
     lastActivatedBid = bid
 
-    if (!isAllowed(bid)) return
+    if (isBlacklisted(bid)) return
 
     var pid = app.processIdentifier
 
@@ -228,9 +227,8 @@ launchctl load -w "$PLIST"
 
 echo ""
 echo "  CmdTabReopener: ACTIVATED"
-echo "  ALLOWLIST is empty by default — this does nothing until you add"
-echo "  bundle IDs to the ALLOWLIST array near the top of this file, then"
-echo "  re-run Activate.command."
+echo "  Switching to an app via Cmd+Tab will now reopen/restore its window"
+echo "  if it was closed or minimized (except apps in BLACKLIST)."
 echo ""
 echo "  This keeps working after restarting your Mac. To turn it off,"
 echo "  double-click Deactivate.command."
